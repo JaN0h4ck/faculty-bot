@@ -5,11 +5,13 @@ import fs from "fs";
 import http from "http";
 //const http = require('http');
 import https from "https";
-import { Client, GuildChannel, Message, TextChannel, MessageEmbed } from "discord.js";
+import { Client, GuildChannel, Message, TextChannel, MessageEmbed, Collection } from "discord.js";
 import { Canvas } from "canvas";
 import Keyv from "keyv";
 import Parser from "rss-parser";
-import request from "request";
+import crypto from "crypto";
+import { channel } from "diagnostics_channel";
+import { error } from "console";
 //const https = require('https');
 
 
@@ -56,13 +58,14 @@ export const RSS = (client: Client) => {
       for (let i = 0; i < rssChannels.length; i++) {
         let channel = client.channels.cache.get(rssChannels[i]) as TextChannel;
         if(channel) {
-          channel.messages.fetch({ limit: 1 }).then(messages => {
+          channel.messages.fetch({ limit: 3 }).then(messages => {
               if (channel != undefined) {
                 // get rss feed
                 if(channel.lastMessage?.embeds[0] && channel.lastMessage.embeds[0].title) {
-                  PrepareMessageAndSend(channel, channel.lastMessage.embeds[0], RSSURLs[i]);
+                  PrepareMessageAndSend(messages, RSSURLs[i], channel);
+                  //console.log("\nFirst message(?): " + messages.at(0)?.embeds[0].title + "\nSecond message(?): " + messages.at(1)?.embeds[0].title + "\nThird message(?): " + messages.at(2)?.embeds[0].title);
                 } else {
-                  PrepareMessageAndSend(channel, new MessageEmbed().setTitle("Hatsune Miku").setFooter({text: "UwU"}),  RSSURLs[i]);
+                  PrepareMessageAndSend(messages, RSSURLs[i], channel);
                 }
               } 
           }).catch(console.error);
@@ -74,63 +77,165 @@ export const RSS = (client: Client) => {
 
 
 
-async function PrepareMessageAndSend(channel: TextChannel, lastmsg: MessageEmbed, specificURL: string) {
+async function PrepareMessageAndSend(lastMessages : Collection<String, Message<boolean>>, specificURL: string, desiredChannel: TextChannel) {
+
   const parser = new Parser();
   const feed = await parser.parseURL(specificURL);
-  const latestPost = feed.items?.[0];
-  var sameTitle = false;
-  var samePubDate = false;
+  const currentFeedItems = feed.items?.slice(0, 3);
+  let amountOfExistingMessages = Array.from(lastMessages.values()).length;
 
-  if (latestPost) {
-    const embed = new MessageEmbed()
-    // hehe
-    .setColor(0xb00b69);
+  console.log("\nAmount of feed items: " +  currentFeedItems.length);
 
-    if (latestPost.title) {
-      embed.setTitle(latestPost.title);
-      if (lastmsg.title == latestPost.title) {
-        //console.log("Post titles Match!");
-        sameTitle = true;
-      }
+  
+  currentFeedItems.forEach(async currentFeedItem => {
+    let alradyExists = false;
+    if(currentFeedItem) {
+      alradyExists = await CheckRSSDB(currentFeedItem, desiredChannel);
     }
 
-    if(latestPost.pubDate) {
-      // Removes unnecessary chars from timestamp
-      var mystring: string = latestPost.pubDate.replace(/\+[0-9]*$/, '');
-      if(lastmsg.footer) {
-        // strings won't match, when no regex removal is done
-        if(lastmsg.footer.text.toLowerCase().replace(/(\n*)( *)/g, '') == mystring.toLowerCase().replace(/(\n*)( *)/g, '')) {
-          samePubDate = true;
+    
+    if(!alradyExists) { 
+      let sameTitle = false;
+      let samePubDate = false;
+
+      for(let j = 0; j < amountOfExistingMessages; j++) {
+        let embed = new MessageEmbed().setColor(0xb00b69);
+        let lastEmbed = lastMessages.at(j)?.embeds[0];
+        if(!lastEmbed) {
+          continue;
+        }
+        
+        if (currentFeedItem.title) {
+          embed.setTitle(currentFeedItem.title);
+          if (lastEmbed.title == currentFeedItem.title) {
+            console.log("Post titles Match!");
+            sameTitle = true;
+          }
+        }
+
+        if(currentFeedItem.pubDate) {
+          // Removes unnecessary chars from timestamp
+          var mystring: string = currentFeedItem.pubDate.replace(/\+[0-9]*$/, '');
+          if(lastEmbed.footer) {
+            // strings won't match, when no regex removal is done
+            if(lastEmbed.footer.text.toLowerCase().replace(/(\n*)( *)/g, '') == mystring.toLowerCase().replace(/(\n*)( *)/g, '')) {
+              samePubDate = true;
+            }
+          }
+          // embed.setTimestamp won't take pubDate and isoDate isn't gonna cut it
+        }
+
+        if(sameTitle) {
+          break;
         }
       }
-      // embed.setTimestamp won't take pubDate and isoDate isn't gonna cut it
-      embed.setFooter({text: mystring});
-    }
 
-    if (latestPost.link) {
-      embed.setURL(latestPost.link);
-    }
+      await sendMessages(currentFeedItem, desiredChannel, sameTitle, samePubDate);
 
-    if (latestPost.content) {
-      // Removes unneccessary text from feed (HSKE specific)
-      embed.setDescription(latestPost.content.replace(/\nall$/, ''));
-      //console.log("\nEmbed desc: \n" + embed.description);
+      
+    } else {
+    console.log("\nRSS Message already exists");
     }
+  });
+}
 
-    if (channel && !sameTitle) {
-      channel.send({
+async function createHash(payload: string) {
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+async function buildEmbed(feedItem: Parser.Item): Promise<MessageEmbed> {
+  let embed = new MessageEmbed()
+  .setColor(0xb00b69);
+  if (feedItem.title) {
+    embed.setTitle(feedItem.title);
+  }
+
+  if(feedItem.pubDate) {
+    // Removes unnecessary chars from timestamp
+    var mystring: string = feedItem.pubDate.replace(/\+[0-9]*$/, '');
+
+    // embed.setTimestamp won't take pubDate and isoDate isn't gonna cut it
+    // and I don't care WHO the IRS sends, I'm not reading the documentation
+    embed.setFooter({text: mystring});
+  }
+
+  if (feedItem.link) {
+    embed.setURL(feedItem.link);
+  }
+
+  if (feedItem.content) {
+    // Last line of conten is always Tags (HSKE Specific)
+    embed.setDescription(feedItem.content.replace(/\n(\w+ ?)+$/g, ''));
+    //console.log("\nEmbed desc: \n" + embed.description);
+  } 
+
+  return embed;
+}
+
+async function sendMessages(feedItem: Parser.Item, desiredChannel: TextChannel, sameTitle: boolean, samePubDate: boolean) {
+  //if(!nothingFound){
+    // New Message
+    if (desiredChannel && !sameTitle) {
+      let embed = await buildEmbed(feedItem);
+      desiredChannel.send({
         content: "Neue Nachricht im Planungsportal:",
         embeds: [embed]
       });
-    } else if(channel && sameTitle && !samePubDate) {
-      channel.send({
+      console.log("\nNeue Nachricht, fuer channel: \n" + desiredChannel.id + "\nEmbed: " + embed);
+
+    } else if (desiredChannel && sameTitle && !samePubDate) // There's been an update to a existing Post
+    {
+
+      let embed = await buildEmbed(feedItem);
+      desiredChannel.send({
         content: "Der letzte Post im Planungsportal wurde aktualisiert",
         embeds: [embed]
       });
+      console.log("\nAktualiserte Nachricht:\n" + desiredChannel.id + "\nEmbed: " + embed);
+
     } else {
-      //console.log("Keine neuen Pfosten im Planungsportal");
+      // Nothing new
+      console.log("Keine neuen Pfosten im Planungsportal");
+
     }
+  /*} else {
+
+    //console.log("\nNo Embeds to compare to found! ChannelD: " + desiredChannel.id);
+    desiredChannel.send({
+      content: "Variante 3 BOTTOM TEXT",
+      embeds: [buildEmbed(feedItem)]
+    });
+
+  }*/
+}
+
+/**
+ * Searches the RSS Database for the message  
+ * 
+ * @param feeditem - the Item form the RSS feed
+ * @param desiredChannel - the channel the message is supposed to land in
+ * @returns true, if the message already has been posted
+ */ 
+async function CheckRSSDB(feeditem: Parser.Item, desiredChannel: TextChannel): Promise<boolean> {
+  const dbrss = new Keyv("sqlite://RSS.sqlite");
+  dbrss.on("error", (err) =>
+    console.error("Keyv connection error:", err)
+  );
+  try{
+    let hash = await createHash(feeditem.toString() + desiredChannel);
+    // MessageID als Key
+    let channelID = await dbrss.get(hash);
+    if(channelID && channelID == desiredChannel) {
+      console.log("\n\n\n\nHERE");
+      return true;
+    } else {
+      await dbrss.set(hash, desiredChannel);
+      return false; // Nothing found in db
+    }
+  } catch(error) {
+    console.error("Some error in the RSS DB function");
   }
+  return false;
 }
 
 

@@ -42,6 +42,11 @@ const dbvoicechannels = new Keyv("sqlite://voicechannels.sqlite"); // const keyv
 dbvoicechannels.on("error", (err: Error) =>
   console.error("Keyv connection error:", err)
 );
+// Key: hash of (RSS Feed Item + ChannelID), Value: ChannelID
+const dbrss = new Keyv("sqlite://RSS.sqlite");
+dbrss.on("error", (err) =>
+    console.error("Keyv connection error:", err)
+);
 
 //db stuff
 let db = new sqlite.Database(":memory:", (err: any) => {
